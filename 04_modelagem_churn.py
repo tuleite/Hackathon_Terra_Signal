@@ -2,6 +2,9 @@
 # /// script
 # [tool.databricks.environment]
 # environment_version = "6"
+# dependencies = [
+#   "shap",
+# ]
 # ///
 # MAGIC %md
 # MAGIC # 04 — Modelagem de churn e comparação de modelos
@@ -1617,7 +1620,10 @@ plt.show()
 
 # COMMAND ----------
 
+
+
 # COMMAND ----------
+
 # SVM RBF como challenger
 # Usa as mesmas 14 features, treino estratificado e CV de 5 folds.
 # O conjunto de teste reservado NÃO é usado neste bloco.
@@ -3015,7 +3021,203 @@ display(resumo_segmentos.round(3))
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## Testando a importância das Variáveis do modelo final
 
+# COMMAND ----------
+
+import numpy as np
+import pandas as pd
+
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
+
+FEATURES_FINAIS = [
+    "tenure", "PhoneService", "MultipleLines", "InternetService",
+    "OnlineSecurity", "OnlineBackup", "DeviceProtection", "TechSupport",
+    "Contract", "PaperlessBilling", "PaymentMethod",
+    "MonthlyCharges", "TotalCharges", "MonthlyIncome",
+]
+
+SEED = 42
+TABELA_HISTORY = "workspace.default.history_modelagem"
+
+history_shap = spark.table(TABELA_HISTORY).toPandas()
+
+X_final = history_shap[FEATURES_FINAIS].copy()
+y_final = history_shap["Churn"].astype(int).copy()
+
+numericas = X_final.select_dtypes(include=np.number).columns.tolist()
+categoricas = [c for c in FEATURES_FINAIS if c not in numericas]
+
+preprocessador_final = ColumnTransformer(
+    transformers=[
+        ("numericas", SimpleImputer(strategy="median"), numericas),
+        (
+            "categoricas",
+            Pipeline([
+                ("imputer", SimpleImputer(strategy="most_frequent")),
+                ("onehot", OneHotEncoder(handle_unknown="ignore")),
+            ]),
+            categoricas,
+        ),
+    ],
+    remainder="drop",
+)
+
+modelo_rf_final = Pipeline([
+    ("preprocessamento", preprocessador_final),
+    ("modelo", RandomForestClassifier(
+        n_estimators=400,
+        max_depth=10,
+        min_samples_leaf=20,
+        class_weight="balanced",
+        random_state=SEED,
+        n_jobs=-1,
+    )),
+])
+
+modelo_rf_final.fit(X_final, y_final)
+
+print("Modelo final preparado para SHAP.")
+
+# COMMAND ----------
+
+# MAGIC %pip install shap
+
+# COMMAND ----------
+
+import shap
+import matplotlib.pyplot as plt
+
+# Amostra apenas para explicabilidade global.
+# Não altera o modelo, as métricas, os scores nem as tabelas.
+N_AMOSTRA_SHAP = min(500, len(X_final))
+X_shap = X_final.sample(n=N_AMOSTRA_SHAP, random_state=SEED)
+
+preprocessador = modelo_rf_final.named_steps["preprocessamento"]
+floresta = modelo_rf_final.named_steps["modelo"]
+
+X_shap_transformado = preprocessador.transform(X_shap)
+
+# SHAP trabalha melhor com matriz densa nesta base pequena.
+if hasattr(X_shap_transformado, "toarray"):
+    X_shap_transformado = X_shap_transformado.toarray()
+
+nomes_transformados = preprocessador.get_feature_names_out()
+
+explainer = shap.TreeExplainer(floresta)
+valores_shap = explainer.shap_values(X_shap_transformado)
+
+# Compatível com versões do SHAP que retornam lista ou array 3D.
+if isinstance(valores_shap, list):
+    valores_churn = valores_shap[1]
+elif valores_shap.ndim == 3:
+    valores_churn = valores_shap[:, :, 1]
+else:
+    valores_churn = valores_shap
+
+def feature_original(nome_transformado):
+    for feature in FEATURES_FINAIS:
+        if (
+            nome_transformado == f"numericas__{feature}"
+            or nome_transformado.startswith(f"categoricas__{feature}_")
+        ):
+            return feature
+    return nome_transformado
+
+importancia_detalhada = pd.DataFrame({
+    "feature_transformada": nomes_transformados,
+    "feature": [feature_original(nome) for nome in nomes_transformados],
+    "importancia_shap": np.abs(valores_churn).mean(axis=0),
+})
+
+importancia_global = (
+    importancia_detalhada
+    .groupby("feature", as_index=False)["importancia_shap"]
+    .sum()
+    .sort_values("importancia_shap", ascending=False)
+    .reset_index(drop=True)
+)
+
+display(importancia_global)
+
+# COMMAND ----------
+
+plt.figure(figsize=(10, 6))
+
+plt.barh(
+    importancia_global["feature"].iloc[::-1],
+    importancia_global["importancia_shap"].iloc[::-1],
+    color="#1F6FEB",
+)
+
+plt.title("Importância global das variáveis no score de churn")
+plt.xlabel("Impacto médio absoluto no score (SHAP)")
+plt.ylabel("")
+plt.grid(axis="x", alpha=0.2)
+plt.tight_layout()
+plt.show()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC O SHAP mostra quais variáveis mais influenciam a priorização de churn do Random Forest. Ele explica o comportamento preditivo do modelo e não demonstra causalidade.
+
+# COMMAND ----------
+
+# Agrupa contribuições SHAP das dummies na feature original
+mapeamento_features = pd.Series(
+    [feature_original(nome) for nome in nomes_transformados],
+    index=nomes_transformados,
+)
+
+shap_detalhado = pd.DataFrame(
+    valores_churn,
+    columns=nomes_transformados,
+    index=X_shap.index,
+)
+
+shap_agrupado = pd.DataFrame(index=X_shap.index)
+
+for feature in FEATURES_FINAIS:
+    colunas_feature = mapeamento_features[
+        mapeamento_features == feature
+    ].index.tolist()
+
+    shap_agrupado[feature] = shap_detalhado[colunas_feature].sum(axis=1)
+
+importancia_global_corrigida = (
+    shap_agrupado
+    .abs()
+    .mean()
+    .sort_values(ascending=False)
+    .reset_index()
+)
+
+importancia_global_corrigida.columns = ["feature", "importancia_shap"]
+
+display(importancia_global_corrigida)
+
+# COMMAND ----------
+
+plt.figure(figsize=(10, 6))
+
+plt.barh(
+    importancia_global_corrigida["feature"].iloc[::-1],
+    importancia_global_corrigida["importancia_shap"].iloc[::-1],
+    color="#1F6FEB",
+)
+
+plt.title("Importância global das variáveis no score de churn")
+plt.xlabel("Impacto médio absoluto no score (SHAP)")
+plt.ylabel("")
+plt.grid(axis="x", alpha=0.2)
+plt.tight_layout()
+plt.show()
 
 # COMMAND ----------
 
@@ -3025,6 +3227,10 @@ display(resumo_segmentos.round(3))
 # MAGIC Cada modelo tem métricas, parâmetros e gráficos de avaliação registrados.
 # MAGIC Caso o workspace não permita criar o experimento compartilhado, altere
 # MAGIC `EXPERIMENTO` para uma pasta onde a equipe tenha permissão de escrita.
+
+# COMMAND ----------
+
+
 
 # COMMAND ----------
 
