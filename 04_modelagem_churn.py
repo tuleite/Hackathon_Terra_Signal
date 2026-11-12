@@ -881,7 +881,7 @@ display(
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Seleção dos finalistas antes do boosting
+# MAGIC ## 7. Seleção dos finalistas antes de novos desafiantes
 # MAGIC
 # MAGIC A Regressão Logística e a Random Forest foram escolhidas como finalistas após comparação por cross-validation com cinco folds, usando PR-AUC como métrica principal e F2 como critério de desempate.
 # MAGIC
@@ -889,8 +889,13 @@ display(
 # MAGIC
 # MAGIC A Random Forest com `max_depth=10` e `min_samples_leaf=20` foi selecionada como challenger de árvores. Sua PR-AUC (`0,654`) foi praticamente equivalente à melhor configuração da floresta, enquanto o maior tamanho mínimo de folha trouxe maior regularização, recall (`0,772`) e F2 (`0,707`) mais altos.
 # MAGIC
-# MAGIC Em seguida, XGBoost será testado como um último challenger. Ele pode capturar interações e relações não lineares de forma mais eficiente que a Random Forest. Será mantido apenas se apresentar ganho consistente de desempenho em cross-validation, sem perda relevante de estabilidade ou interpretabilidade prática.
+# MAGIC Em seguida, XGBoost, CatBoost e SVM serão testado como challengers. Esses algoritmos pode capturar interações e relações não lineares de forma mais eficiente que a Random Forest. Serão mantido apenas se apresentarem ganho consistente de desempenho em cross-validation, sem perda relevante de estabilidade ou interpretabilidade prática.
 # MAGIC
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### XGBoost
 
 # COMMAND ----------
 
@@ -1041,7 +1046,7 @@ print("XGBoost registrado no MLflow.")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Por último um teste com CatBoost
+# MAGIC ### CatBoost
 
 # COMMAND ----------
 
@@ -1322,6 +1327,7 @@ with mlflow.start_run(run_name="challenger_cv__catboost__modelo_enxuto"):
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC #### Thresholds da Regressão Logística
 # MAGIC Testando também o threshold da regressâo logística - considerando a amostra desbalanceada, o threshold 0.5 automático não necessariamente é a melhor escolha.<br>
 # MAGIC Vamos varrer thresholds de 0.2 a 0.8 e avaliar as métricas resultantes.
 
@@ -1616,11 +1622,7 @@ plt.show()
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Teste SVM
-
-# COMMAND ----------
-
-
+# MAGIC ### SVM-RBF
 
 # COMMAND ----------
 
@@ -1830,7 +1832,7 @@ display(resultado_svm_tabela.round(3))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Teste de Sendibilidade com variáveis de gênero e seniorCitizen
+# MAGIC ### Teste de Sensibilidade com variáveis de gênero e seniorCitizen
 
 # COMMAND ----------
 
@@ -2090,7 +2092,7 @@ display(
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Avaliação dos modelos testados
+# MAGIC ## 8. Avaliação dos modelos testados
 
 # COMMAND ----------
 
@@ -2221,7 +2223,7 @@ display(
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 5. Avaliação final no conjunto de teste
+# MAGIC ## 9. Avaliação final no conjunto de teste
 # MAGIC
 # MAGIC O teste é usado uma única vez, depois da comparação via CV. As métricas abaixo
 # MAGIC usam threshold padrão de 0,50 apenas como referência; o threshold de campanha
@@ -2624,7 +2626,7 @@ display(comparacao_top_final.round(3))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Treino do modelo em toda base histórica para inferência
+# MAGIC ## 10. Treino do modelo em toda base histórica para inferência
 
 # COMMAND ----------
 
@@ -3022,7 +3024,7 @@ display(resumo_segmentos.round(3))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Testando a importância das Variáveis do modelo final
+# MAGIC ## 11. Testando a importância das Variáveis do modelo final
 
 # COMMAND ----------
 
@@ -3222,68 +3224,7 @@ plt.show()
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 7. Registrar evidências no MLflow
-# MAGIC
-# MAGIC Cada modelo tem métricas, parâmetros e gráficos de avaliação registrados.
-# MAGIC Caso o workspace não permita criar o experimento compartilhado, altere
-# MAGIC `EXPERIMENTO` para uma pasta onde a equipe tenha permissão de escrita.
-
-# COMMAND ----------
-
-
-
-# COMMAND ----------
-
-mlflow.set_experiment(EXPERIMENTO)
-
-for nome, pipeline in pipelines_ajustados.items():
-    probabilidades = pipeline.predict_proba(X_test)[:, 1]
-    metricas = metricas_teste(y_test, probabilidades)
-
-    with mlflow.start_run(run_name=nome):
-        mlflow.set_tags({
-            "projeto": "terra_signal_churn",
-            "cenario_pagamento": "PaymentMethod_completo",
-            "features_sensiveis_incluidas": "nao",
-            "target": "Churn",
-        })
-        mlflow.log_params({
-            "modelo": nome,
-            "n_features_antes_do_onehot": len(features_modelo),
-            "seed": SEED,
-            "test_size": 0.20,
-            "cv_folds": 5,
-        })
-        mlflow.log_metrics({f"test_{chave}": float(valor) for chave, valor in metricas.items()})
-
-        with tempfile.TemporaryDirectory() as diretorio:
-            caminho_roc = os.path.join(diretorio, "curva_roc.png")
-            caminho_pr = os.path.join(diretorio, "curva_precision_recall.png")
-
-            fig, ax = plt.subplots(figsize=(6, 5))
-            RocCurveDisplay.from_predictions(y_test, probabilidades, ax=ax, name=nome)
-            ax.set_title(f"ROC — {nome}")
-            fig.tight_layout()
-            fig.savefig(caminho_roc, dpi=150)
-            plt.close(fig)
-
-            fig, ax = plt.subplots(figsize=(6, 5))
-            PrecisionRecallDisplay.from_predictions(y_test, probabilidades, ax=ax, name=nome)
-            ax.set_title(f"Precision-Recall — {nome}")
-            fig.tight_layout()
-            fig.savefig(caminho_pr, dpi=150)
-            plt.close(fig)
-
-            mlflow.log_artifact(caminho_roc)
-            mlflow.log_artifact(caminho_pr)
-            mlflow.sklearn.log_model(pipeline, name="model")
-
-print("Runs registrados no MLflow.")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 8. Criando tabelas para alimentar cen[arios de decisäo - preven;áo e urgëncia]
+# MAGIC ## 12. Criando tabelas para alimentar cen[arios de decisäo - preven;áo e urgëncia]
 # MAGIC
 
 # COMMAND ----------
@@ -4181,9 +4122,8 @@ print(f"Linhas gravadas: {len(cenarios_dashboard):,}")
 
 # COMMAND ----------
 
-display(
-    spark.table("workspace.default.clientes_risco_churn")
-)
+# MAGIC %md
+# MAGIC ## 13. Gerando arquivo de evidência com scores de churn para clientes em inference.csv
 
 # COMMAND ----------
 
@@ -4215,6 +4155,3 @@ predicao.toPandas().to_csv(arquivo, index=False)
 
 print(f"Arquivo gerado: {arquivo}")
 display(predicao.limit(10))
-
-# COMMAND ----------
-
